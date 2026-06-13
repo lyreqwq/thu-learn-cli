@@ -2352,6 +2352,7 @@ dependencies = [
  "thirtyfour",
  "tokio",
  "toml",
+ "unicode-width",
  "url",
 ]
 
