@@ -9,10 +9,217 @@ use crate::client::Client;
 use crate::models::{short_id, Course, HomeworkStatus};
 use crate::paths;
 use owo_colors::{OwoColorize, Stream::Stdout};
+use unicode_width::UnicodeWidthStr;
 
 /// Dims IDs and secondary details when stdout supports color.
 fn dim(s: &str) -> String {
     format!("{}", s.if_supports_color(Stdout, |t| t.dimmed()))
+}
+
+#[derive(Debug, Clone)]
+struct TableCell {
+    text: String,
+    width: usize,
+}
+
+impl TableCell {
+    fn plain(raw: impl Into<String>) -> Self {
+        let text = raw.into();
+        let width = UnicodeWidthStr::width(text.as_str());
+        Self { text, width }
+    }
+
+    fn styled(raw: &str, styled: String) -> Self {
+        Self {
+            text: styled,
+            width: UnicodeWidthStr::width(raw),
+        }
+    }
+}
+
+fn render_table(headers: &[&str], rows: &[Vec<TableCell>]) -> String {
+    let mut widths: Vec<usize> = headers.iter().map(|h| UnicodeWidthStr::width(*h)).collect();
+    for row in rows {
+        for (idx, cell) in row.iter().enumerate() {
+            if let Some(width) = widths.get_mut(idx) {
+                *width = (*width).max(cell.width);
+            }
+        }
+    }
+
+    let mut lines = Vec::with_capacity(rows.len() + 2);
+    lines.push(render_table_line(headers.iter().enumerate().map(
+        |(idx, header)| (*header, UnicodeWidthStr::width(*header), widths[idx]),
+    )));
+    lines.push(
+        widths
+            .iter()
+            .map(|width| "-".repeat(*width))
+            .collect::<Vec<_>>()
+            .join("  "),
+    );
+    for row in rows {
+        lines.push(render_table_line(
+            row.iter()
+                .enumerate()
+                .map(|(idx, cell)| (cell.text.as_str(), cell.width, widths[idx])),
+        ));
+    }
+    lines.join("\n")
+}
+
+fn render_table_line<'a>(cells: impl IntoIterator<Item = (&'a str, usize, usize)>) -> String {
+    let cells = cells.into_iter().collect::<Vec<_>>();
+    let last_idx = cells.len().saturating_sub(1);
+    cells
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (text, width, column_width))| {
+            let padding = column_width.saturating_sub(width);
+            if idx == last_idx {
+                text.to_string()
+            } else {
+                format!("{text}{}", " ".repeat(padding))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+fn format_deadline(
+    deadline: Option<chrono::DateTime<chrono::Local>>,
+    deadline_raw: &str,
+    now: chrono::DateTime<chrono::Local>,
+) -> (String, String) {
+    match deadline {
+        Some(d) => {
+            let remain = d.signed_duration_since(now);
+            let days = remain.num_days();
+            let when = d.format("%Y-%m-%d %H:%M").to_string();
+            if remain.num_seconds() < 0 {
+                let raw = format!("{when} (overdue)");
+                let styled = format!(
+                    "{when} ({})",
+                    "overdue".if_supports_color(Stdout, |t| t.bright_red())
+                );
+                (raw, styled)
+            } else if days == 0 {
+                let tag = format!("within {}h today", remain.num_hours());
+                let styled = format!(
+                    "{when} ({})",
+                    tag.if_supports_color(Stdout, |t| t.bright_red())
+                );
+                (format!("{when} ({tag})"), styled)
+            } else if days <= 3 {
+                let tag = format!("{days} days left");
+                let styled = format!("{when} ({})", tag.if_supports_color(Stdout, |t| t.yellow()));
+                (format!("{when} ({tag})"), styled)
+            } else {
+                let tag = format!("{days} days left");
+                let styled = format!("{when} ({})", tag.if_supports_color(Stdout, |t| t.green()));
+                (format!("{when} ({tag})"), styled)
+            }
+        }
+        None => (deadline_raw.to_string(), deadline_raw.to_string()),
+    }
+}
+
+fn homework_status_cell(status: HomeworkStatus) -> TableCell {
+    let raw = status.label();
+    let styled = match status {
+        HomeworkStatus::Submitted => format!("{}", raw.if_supports_color(Stdout, |t| t.green())),
+        HomeworkStatus::Graded => format!("{}", raw.if_supports_color(Stdout, |t| t.cyan())),
+        HomeworkStatus::Pending => raw.to_string(),
+    };
+    TableCell::styled(raw, styled)
+}
+
+fn render_homework_table(
+    hws: &[crate::models::Homework],
+    now: chrono::DateTime<chrono::Local>,
+) -> String {
+    let has_grade = hws.iter().any(|h| h.grade.is_some());
+    let mut headers = vec!["ID", "Status", "Course", "Title", "Deadline"];
+    if has_grade {
+        headers.push("Grade");
+    }
+
+    let rows = hws
+        .iter()
+        .map(|h| {
+            let course = if h.course_name.is_empty() {
+                "(previous course)"
+            } else {
+                &h.course_name
+            };
+            let (deadline_raw, deadline_styled) = format_deadline(h.deadline, &h.deadline_raw, now);
+            let id = short_id(&h.student_homework_id);
+            let mut row = vec![
+                TableCell::styled(&id, dim(&id)),
+                homework_status_cell(h.status),
+                TableCell::styled(
+                    course,
+                    format!("{}", course.if_supports_color(Stdout, |t| t.bold())),
+                ),
+                TableCell::plain(h.title.as_str()),
+                TableCell::styled(&deadline_raw, deadline_styled),
+            ];
+            if has_grade {
+                row.push(TableCell::plain(h.grade.as_deref().unwrap_or("")));
+            }
+            row
+        })
+        .collect::<Vec<_>>();
+
+    render_table(&headers, &rows)
+}
+
+fn render_announcement_table(notes: &[crate::models::Notification]) -> String {
+    let rows = notes
+        .iter()
+        .map(|n| {
+            let state = if n.read { "Read" } else { "Unread" };
+            let id = short_id(&n.id);
+            let title = if n.read {
+                n.title.clone()
+            } else {
+                format!("{}", n.title.if_supports_color(Stdout, |t| t.bold()))
+            };
+            vec![
+                TableCell::styled(&id, dim(&id)),
+                TableCell::plain(state),
+                TableCell::styled(
+                    &n.course_name,
+                    format!("{}", n.course_name.if_supports_color(Stdout, |t| t.cyan())),
+                ),
+                TableCell::styled(&n.title, title),
+                TableCell::plain(&n.publisher),
+                TableCell::plain(&n.publish_time),
+            ]
+        })
+        .collect::<Vec<_>>();
+
+    render_table(
+        &["ID", "State", "Course", "Title", "Publisher", "Published"],
+        &rows,
+    )
+}
+
+fn render_course_file_table(files: &[crate::models::CourseFile]) -> String {
+    let rows = files
+        .iter()
+        .map(|f| {
+            let id = short_id(&f.id);
+            vec![
+                TableCell::styled(&id, dim(&id)),
+                TableCell::plain(f.title.as_str()),
+                TableCell::plain(f.size.as_str()),
+                TableCell::plain(f.upload_time.as_str()),
+            ]
+        })
+        .collect::<Vec<_>>();
+
+    render_table(&["ID", "Title", "Size", "Uploaded"], &rows)
 }
 
 #[derive(Parser)]
@@ -238,69 +445,7 @@ async fn cmd_homework(all: bool, overdue: bool, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    for h in &hws {
-        let ddl = match h.deadline {
-            Some(d) => {
-                let remain = d.signed_duration_since(now);
-                let days = remain.num_days();
-                let when = d.format("%Y-%m-%d %H:%M").to_string();
-                if remain.num_seconds() < 0 {
-                    format!(
-                        "{when} ({})",
-                        "overdue".if_supports_color(Stdout, |t| t.bright_red())
-                    )
-                } else if days == 0 {
-                    let tag = format!("within {}h today", remain.num_hours());
-                    format!(
-                        "{when} ({})",
-                        tag.if_supports_color(Stdout, |t| t.bright_red())
-                    )
-                } else if days <= 3 {
-                    let tag = format!("{days} days left");
-                    format!("{when} ({})", tag.if_supports_color(Stdout, |t| t.yellow()))
-                } else {
-                    let tag = format!("{days} days left");
-                    format!("{when} ({})", tag.if_supports_color(Stdout, |t| t.green()))
-                }
-            }
-            None => h.deadline_raw.clone(),
-        };
-        let grade = h
-            .grade
-            .as_deref()
-            .map(|g| format!(" grade:{g}"))
-            .unwrap_or_default();
-        let course = if h.course_name.is_empty() {
-            "(previous course)"
-        } else {
-            &h.course_name
-        };
-        // Color submitted and graded statuses for quick scanning.
-        let status = match h.status {
-            HomeworkStatus::Submitted => {
-                format!(
-                    "{}",
-                    h.status.label().if_supports_color(Stdout, |t| t.green())
-                )
-            }
-            HomeworkStatus::Graded => {
-                format!(
-                    "{}",
-                    h.status.label().if_supports_color(Stdout, |t| t.cyan())
-                )
-            }
-            HomeworkStatus::Pending => h.status.label().to_string(),
-        };
-        println!(
-            "[{}] {} | {}\n      Deadline: {} | {}{}",
-            status,
-            course.if_supports_color(Stdout, |t| t.bold()),
-            h.title,
-            ddl,
-            dim(&format!("id: {}", short_id(&h.student_homework_id))),
-            grade
-        );
-    }
+    println!("{}", render_homework_table(&hws, now));
     Ok(())
 }
 
@@ -440,28 +585,7 @@ async fn cmd_announcement(json: bool) -> Result<()> {
         println!("No announcements");
         return Ok(());
     }
-    for n in &notes {
-        // Highlight unread announcements with a red dot and bold title.
-        let (flag, title) = if n.read {
-            (" ".to_string(), n.title.clone())
-        } else {
-            (
-                format!("{}", "●".if_supports_color(Stdout, |t| t.bright_red())),
-                format!("{}", n.title.if_supports_color(Stdout, |t| t.bold())),
-            )
-        };
-        println!(
-            "{flag} {} | {}\n    {}",
-            n.course_name.if_supports_color(Stdout, |t| t.cyan()),
-            title,
-            dim(&format!(
-                "{} · {} · id: {}",
-                n.publisher,
-                n.publish_time,
-                short_id(&n.id)
-            )),
-        );
-    }
+    println!("{}", render_announcement_table(&notes));
     eprintln!("\nRun `thu-learn ann <id>` to read an announcement.");
     Ok(())
 }
@@ -528,15 +652,7 @@ async fn cmd_file_ls(filter: Option<String>, json: bool) -> Result<()> {
         match res {
             Ok(files) if !files.is_empty() => {
                 println!("# {}", course.name.if_supports_color(Stdout, |t| t.bold()));
-                for f in files {
-                    println!(
-                        "  {} | {} | {} | {}",
-                        f.title,
-                        f.size,
-                        f.upload_time,
-                        dim(&format!("id: {}", short_id(&f.id))),
-                    );
-                }
+                println!("{}", render_course_file_table(files));
             }
             Ok(_) => {}
             Err(e) => eprintln!("  (failed to fetch files for {}: {e})", course.name),
@@ -651,8 +767,77 @@ async fn cmd_submit(homework_id: String, file: PathBuf, comment: String) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use super::{prev_semester, Cli};
+    use super::{
+        prev_semester, render_announcement_table, render_course_file_table, render_homework_table,
+        render_table, Cli, TableCell,
+    };
+    use crate::models::{short_id, CourseFile, Homework, HomeworkStatus, Notification};
+    use chrono::TimeZone;
     use clap::CommandFactory;
+
+    fn local_dt(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+    ) -> chrono::DateTime<chrono::Local> {
+        chrono::Local
+            .with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+            .unwrap()
+    }
+
+    fn homework(
+        student_homework_id: &str,
+        course_name: &str,
+        title: &str,
+        deadline: Option<chrono::DateTime<chrono::Local>>,
+        grade: Option<&str>,
+        status: HomeworkStatus,
+    ) -> Homework {
+        Homework {
+            student_homework_id: student_homework_id.to_string(),
+            base_id: format!("base-{student_homework_id}"),
+            course_id: "course-1".to_string(),
+            course_name: course_name.to_string(),
+            title: title.to_string(),
+            deadline,
+            deadline_raw: "No deadline".to_string(),
+            submit_time: String::new(),
+            grade: grade.map(str::to_string),
+            comment: String::new(),
+            grader: String::new(),
+            grade_time: String::new(),
+            status,
+        }
+    }
+
+    fn notification(id: &str, read: bool) -> Notification {
+        Notification {
+            id: id.to_string(),
+            course_id: "course-1".to_string(),
+            course_name: "Operating Systems".to_string(),
+            title: if read { "Slides posted" } else { "Exam notice" }.to_string(),
+            publish_time: "2026-06-01 09:00".to_string(),
+            publisher: "Teacher".to_string(),
+            read,
+            content: String::new(),
+        }
+    }
+
+    fn course_file(id: &str) -> CourseFile {
+        CourseFile {
+            id: id.to_string(),
+            course_id: "course-1".to_string(),
+            course_name: "Operating Systems".to_string(),
+            title: "Lecture 讲义.pdf".to_string(),
+            size: "1.5 MB".to_string(),
+            file_type: "pdf".to_string(),
+            upload_time: "2026-06-02 10:30".to_string(),
+            description: String::new(),
+        }
+    }
 
     #[test]
     fn prev_semester_spring_to_fall() {
@@ -679,5 +864,82 @@ mod tests {
         assert!(help.contains("Tsinghua Learn command-line client"));
         assert!(!help.contains("清华"));
         assert!(!help.contains("作业"));
+    }
+
+    #[test]
+    fn table_renderer_pads_wide_unicode_cells() {
+        let table = render_table(
+            &["Name", "Value"],
+            &[
+                vec![TableCell::plain("作业"), TableCell::plain("x")],
+                vec![TableCell::plain("abc"), TableCell::plain("y")],
+            ],
+        );
+
+        assert_eq!(table, "Name  Value\n----  -----\n作业  x\nabc   y");
+    }
+
+    #[test]
+    fn homework_table_includes_grade_only_when_present() {
+        let now = local_dt(2026, 6, 1, 12, 0);
+        let ungraded = homework(
+            "student-homework-one",
+            "Data Structures",
+            "Heap lab",
+            Some(local_dt(2026, 6, 5, 23, 59)),
+            None,
+            HomeworkStatus::Pending,
+        );
+        let graded = homework(
+            "student-homework-two",
+            "Computer Networks",
+            "Protocol report",
+            Some(local_dt(2026, 6, 7, 10, 0)),
+            Some("95"),
+            HomeworkStatus::Graded,
+        );
+
+        let with_grade = render_homework_table(&[ungraded.clone(), graded.clone()], now);
+        let header = with_grade.lines().next().unwrap();
+        assert!(header.contains("ID"));
+        assert!(header.contains("Status"));
+        assert!(header.contains("Course"));
+        assert!(header.contains("Title"));
+        assert!(header.contains("Deadline"));
+        assert!(header.contains("Grade"));
+        assert!(with_grade.contains(&short_id("student-homework-one")));
+        assert!(with_grade.contains("Pending"));
+        assert!(with_grade.contains("Data Structures"));
+        assert!(with_grade.contains("Heap lab"));
+        assert!(with_grade.contains("2026-06-05 23:59"));
+        assert!(with_grade.contains("95"));
+
+        let without_grade = render_homework_table(&[ungraded], now);
+        assert!(!without_grade.lines().next().unwrap().contains("Grade"));
+    }
+
+    #[test]
+    fn announcement_table_renders_short_ids_and_read_state() {
+        let unread = notification("announcement-unread", false);
+        let read = notification("announcement-read", true);
+        let table = render_announcement_table(&[unread.clone(), read.clone()]);
+
+        assert!(table.contains(&short_id(&unread.id)));
+        assert!(table.contains("Unread"));
+        assert!(table.contains("Exam notice"));
+        assert!(table.contains(&short_id(&read.id)));
+        assert!(table.contains("Read"));
+        assert!(table.contains("Slides posted"));
+    }
+
+    #[test]
+    fn course_file_table_renders_file_metadata() {
+        let file = course_file("course-file-one");
+        let table = render_course_file_table(std::slice::from_ref(&file));
+
+        assert!(table.contains(&short_id(&file.id)));
+        assert!(table.contains("Lecture 讲义.pdf"));
+        assert!(table.contains("1.5 MB"));
+        assert!(table.contains("2026-06-02 10:30"));
     }
 }
