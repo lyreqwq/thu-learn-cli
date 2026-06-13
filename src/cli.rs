@@ -861,7 +861,7 @@ mod tests {
         Cli::command().write_long_help(&mut help).unwrap();
         let help = String::from_utf8(help).unwrap();
 
-        assert!(help.contains("Tsinghua Learn command-line client"));
+        assert!(help.contains("Tsinghua Web Learning command-line client"));
         assert!(!help.contains("清华"));
         assert!(!help.contains("作业"));
     }
