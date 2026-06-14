@@ -507,6 +507,10 @@ fn apply_html_tag(raw: &str, out: &mut String, link: &mut Option<LinkBuffer>) {
             if let Some(link) = link.take() {
                 push_rendered_link(out, link);
             }
+        } else if matches!(name.as_str(), "td" | "th") {
+            push_html_text(out, link, " ");
+        } else if name == "tr" {
+            push_html_break(out, link, 1);
         } else if is_block_html_tag(&name) {
             push_html_break(out, link, 2);
         }
@@ -520,6 +524,8 @@ fn apply_html_tag(raw: &str, out: &mut String, link: &mut Option<LinkBuffer>) {
             push_html_break(out, link, 1);
             push_html_text(out, link, "- ");
         }
+        "tr" => push_line_start(out, link),
+        "td" | "th" => push_html_text(out, link, " "),
         "a" => {
             if let Some(current) = link.take() {
                 push_rendered_link(out, current);
@@ -570,6 +576,16 @@ fn push_html_break(out: &mut String, link: &mut Option<LinkBuffer>, count: usize
     }
 }
 
+fn push_line_start(out: &mut String, link: &mut Option<LinkBuffer>) {
+    let target = link
+        .as_ref()
+        .map(|link| link.text.as_str())
+        .unwrap_or(out.as_str());
+    if !target.is_empty() && !target.ends_with('\n') {
+        push_html_char(out, link, '\n');
+    }
+}
+
 fn is_block_html_tag(name: &str) -> bool {
     matches!(
         name,
@@ -598,11 +614,8 @@ fn is_block_html_tag(name: &str) -> bool {
             | "section"
             | "table"
             | "tbody"
-            | "td"
             | "tfoot"
-            | "th"
             | "thead"
-            | "tr"
             | "ul"
     )
 }
@@ -825,6 +838,27 @@ mod tests {
         assert_eq!(
             text,
             "请完成以下任务：\n\n- 阅读README\n- 提交报告\n\n参考链接：说明文档 (https://learn.tsinghua.edu.cn/ref)"
+        );
+    }
+
+    #[test]
+    fn strip_html_formats_file_description_tables() {
+        let html = concat!(
+            "&lt;p&gt;资料说明&lt;/p&gt;",
+            "&lt;table&gt;",
+            "&lt;tr&gt;&lt;th&gt;文件&lt;/th&gt;&lt;th&gt;用途&lt;/th&gt;&lt;/tr&gt;",
+            "&lt;tr&gt;&lt;td&gt;slides.pdf&lt;/td&gt;&lt;td&gt;课件&lt;/td&gt;&lt;/tr&gt;",
+            "&lt;/table&gt;",
+            "&lt;p&gt;下载镜像：",
+            "&lt;a href=&quot;https://learn.tsinghua.edu.cn/files/slides.pdf&quot;&gt;slides.pdf&lt;/a&gt;",
+            "&lt;/p&gt;",
+        );
+
+        let text = strip_html(html);
+
+        assert_eq!(
+            text,
+            "资料说明\n\n文件 用途\nslides.pdf 课件\n\n下载镜像：slides.pdf (https://learn.tsinghua.edu.cn/files/slides.pdf)"
         );
     }
 
