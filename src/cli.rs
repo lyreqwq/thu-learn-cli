@@ -24,17 +24,96 @@ struct TableCell {
 
 impl TableCell {
     fn plain(raw: impl Into<String>) -> Self {
-        let text = raw.into();
+        let text = sanitize_table_text(&raw.into());
         let width = UnicodeWidthStr::width(text.as_str());
         Self { text, width }
     }
 
     fn styled(raw: &str, styled: String) -> Self {
+        let text = sanitize_table_text(raw);
+        let display = if text == raw { styled } else { text.clone() };
         Self {
-            text: styled,
-            width: UnicodeWidthStr::width(raw),
+            text: display,
+            width: UnicodeWidthStr::width(text.as_str()),
         }
     }
+}
+
+fn sanitize_table_text(raw: &str) -> String {
+    strip_terminal_controls(raw)
+}
+
+fn strip_terminal_controls(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            strip_escape_sequence(&mut chars);
+        } else if c == '\u{9b}' {
+            strip_csi_sequence(&mut chars);
+        } else if is_table_format_char(c) {
+            continue;
+        } else if is_table_control_char(c) {
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+
+    out
+}
+
+fn strip_escape_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    match chars.peek().copied() {
+        Some('[') => {
+            chars.next();
+            strip_csi_sequence(chars);
+        }
+        Some(']') => {
+            chars.next();
+            let mut saw_esc = false;
+            for c in chars.by_ref() {
+                if saw_esc && c == '\\' {
+                    break;
+                }
+                saw_esc = c == '\u{1b}';
+                if c == '\u{7}' {
+                    break;
+                }
+            }
+        }
+        Some(_) => {
+            chars.next();
+        }
+        None => {}
+    }
+}
+
+fn strip_csi_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    for c in chars.by_ref() {
+        if ('@'..='~').contains(&c) {
+            break;
+        }
+    }
+}
+
+fn is_table_control_char(c: char) -> bool {
+    c.is_control()
+}
+
+fn is_table_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00ad}'
+            | '\u{034f}'
+            | '\u{061c}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{feff}'
+    )
 }
 
 /// Renders a rounded box-drawing table with dimmed borders and bold headers.
@@ -918,6 +997,26 @@ mod tests {
             "╰──────┴───────╯",
         );
         assert_eq!(strip_ansi(&table), expected);
+    }
+
+    #[test]
+    fn table_renderer_removes_terminal_control_sequences_from_cells() {
+        let table = render_table(
+            &["Title", "Published"],
+            &[vec![
+                TableCell::styled(
+                    "WeChat Group for \"Physics(1)\"\u{200b}\u{1b}[118;1:3u",
+                    "WeChat Group for \"Physics(1)\"\u{200b}\u{1b}[118;1:3u".to_string(),
+                ),
+                TableCell::plain("2026-02-25 21:19"),
+            ]],
+        );
+
+        assert!(!table.contains("\u{1b}[118;1:3u"));
+        assert!(!table.contains('\u{200b}'));
+        let table = strip_ansi(&table);
+        assert!(table.contains("WeChat Group for \"Physics(1)\""));
+        assert!(table.contains("│ WeChat Group for \"Physics(1)\" │"));
     }
 
     #[test]
