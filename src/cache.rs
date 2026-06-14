@@ -18,24 +18,6 @@ fn cache_file(key: &str) -> PathBuf {
     cache_dir().join(format!("{key}.json"))
 }
 
-pub fn read_json<T>(key: &str) -> Option<T>
-where
-    T: DeserializeOwned,
-{
-    let bytes = std::fs::read(cache_file(key)).ok()?;
-    serde_json::from_slice::<T>(&bytes).ok()
-}
-
-pub fn write_json<T>(key: &str, value: &T)
-where
-    T: Serialize + ?Sized,
-{
-    if let Ok(bytes) = serde_json::to_vec(value) {
-        std::fs::create_dir_all(cache_dir()).ok();
-        std::fs::write(cache_file(key), bytes).ok();
-    }
-}
-
 /// Returns a fresh cache hit, or runs `fut` and stores the result.
 pub async fn with_cache<T, F>(key: &str, ttl: Duration, fut: F) -> Result<T>
 where

@@ -2,7 +2,6 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use crate::browser_login;
@@ -335,63 +334,6 @@ fn render_course_file_table(files: &[crate::models::CourseFile]) -> String {
     render_table(&["ID", "Title", "Size", "Uploaded"], &rows)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct CompletionItem {
-    value: String,
-    description: String,
-}
-
-fn completion_items_for_homework(hws: &[crate::models::Homework]) -> Vec<CompletionItem> {
-    hws.iter()
-        .map(|h| CompletionItem {
-            value: short_id(&h.student_homework_id),
-            description: format!("{} | {}", h.course_name, h.title),
-        })
-        .collect()
-}
-
-fn completion_items_for_announcements(
-    notes: &[crate::models::Notification],
-) -> Vec<CompletionItem> {
-    notes
-        .iter()
-        .map(|n| CompletionItem {
-            value: short_id(&n.id),
-            description: format!("{} | {}", n.course_name, n.title),
-        })
-        .collect()
-}
-
-fn completion_items_for_files(files: &[crate::models::CourseFile]) -> Vec<CompletionItem> {
-    files
-        .iter()
-        .map(|f| CompletionItem {
-            value: short_id(&f.id),
-            description: format!("{} | {}", f.course_name, f.title),
-        })
-        .collect()
-}
-
-fn completion_items_for_courses(courses: &[Course]) -> Vec<CompletionItem> {
-    courses
-        .iter()
-        .map(|c| CompletionItem {
-            value: short_id(&c.id),
-            description: format!("{} | {}", c.name, c.teacher),
-        })
-        .collect()
-}
-
-fn filter_completion_items(items: &[CompletionItem], prefix: &str) -> Vec<CompletionItem> {
-    let mut matches = items
-        .iter()
-        .filter(|item| item.value.starts_with(prefix))
-        .cloned()
-        .collect::<Vec<_>>();
-    matches.sort_by(|a, b| a.value.cmp(&b.value));
-    matches
-}
-
 enum IdResolution<'a, T> {
     Found(&'a T),
     NotFound,
@@ -476,124 +418,6 @@ fn filter_courses<'a>(courses: &'a [Course], query: Option<&str>) -> Result<Vec<
     }
 }
 
-fn format_completion_line(item: &CompletionItem) -> String {
-    format!("{}\t{}", item.value, item.description.replace('\t', " "))
-}
-
-fn completion_cache_key(kind: CompletionKind) -> &'static str {
-    match kind {
-        CompletionKind::Homework => "completion_homework",
-        CompletionKind::Announcement => "completion_announcement",
-        CompletionKind::File => "completion_file",
-        CompletionKind::Course => "completion_course",
-    }
-}
-
-fn write_completion_cache(kind: CompletionKind, items: &[CompletionItem]) {
-    crate::cache::write_json(completion_cache_key(kind), items);
-}
-
-fn read_completion_cache(kind: CompletionKind) -> Vec<CompletionItem> {
-    crate::cache::read_json(completion_cache_key(kind)).unwrap_or_default()
-}
-
-fn zsh_completion_script() -> &'static str {
-    r#"#compdef thu-learn
-
-_thu_learn_cached_ids() {
-  local kind="$1"
-  local -a lines
-  lines=("${(@f)$("${words[1]}" __complete "$kind" "$PREFIX" 2>/dev/null)}")
-  if (( ${#lines} )); then
-    local -a candidates
-    local line value desc
-    for line in "${lines[@]}"; do
-      value="${line%%$'\t'*}"
-      desc="${line#*$'\t'}"
-      candidates+=("${value}:${desc}")
-    done
-    _describe -t "thu-learn-${kind}-ids" "${kind} ids" candidates
-  fi
-}
-
-_thu_learn() {
-  local -a commands file_commands
-  commands=(
-    "login:log in through Chrome"
-    "homework:list or show homework"
-    "hw:list or show homework"
-    "courses:list course IDs and names"
-    "announcement:list or show announcements"
-    "ann:list or show announcements"
-    "file:list, show, or download course files"
-    "f:list, show, or download course files"
-    "submit:submit homework"
-    "completion:print shell completion scripts"
-  )
-  file_commands=(
-    "ls:list course files"
-    "show:show file details"
-    "get:download a course file"
-  )
-
-  case "$words[2]" in
-    homework|hw)
-      if [[ "${words[CURRENT-1]}" == (-c|--course) ]]; then
-        _thu_learn_cached_ids course
-      elif (( CURRENT == 3 )); then
-        _thu_learn_cached_ids homework
-      else
-        _arguments '*::arg:->args'
-      fi
-      ;;
-    announcement|ann)
-      if [[ "${words[CURRENT-1]}" == (-c|--course) ]]; then
-        _thu_learn_cached_ids course
-      elif (( CURRENT == 3 )); then
-        _thu_learn_cached_ids announcement
-      else
-        _arguments '*::arg:->args'
-      fi
-      ;;
-    submit)
-      if (( CURRENT == 3 )); then
-        _thu_learn_cached_ids homework
-      elif (( CURRENT == 4 )); then
-        _files
-      else
-        _arguments '*::arg:->args'
-      fi
-      ;;
-    file|f)
-      if (( CURRENT == 3 )); then
-        _describe -t thu-learn-file-commands 'file command' file_commands
-      elif [[ "$words[3]" == ls ]] && [[ "${words[CURRENT-1]}" == (-c|--course) ]]; then
-        _thu_learn_cached_ids course
-      elif (( CURRENT == 4 )) && [[ "$words[3]" == (show|get) ]]; then
-        _thu_learn_cached_ids file
-      else
-        _arguments '*::arg:->args'
-      fi
-      ;;
-    completion)
-      if (( CURRENT == 3 )); then
-        _values 'shell' zsh
-      fi
-      ;;
-    *)
-      if (( CURRENT == 2 )); then
-        _describe -t thu-learn-commands 'command' commands
-      else
-        _arguments '*::arg:->args'
-      fi
-      ;;
-  esac
-}
-
-_thu_learn "$@"
-"#
-}
-
 #[derive(Parser)]
 #[command(
     name = "thu-learn",
@@ -649,20 +473,8 @@ enum Commands {
     #[command(hide = true)]
     Debug,
 
-    /// Print shell completion scripts.
-    Completion {
-        #[command(subcommand)]
-        shell: CompletionShell,
-    },
     /// List courses with short IDs for `--course` filters.
     Courses,
-
-    /// Print cached completion candidates.
-    #[command(name = "__complete", hide = true)]
-    Complete {
-        kind: CompletionKind,
-        prefix: Option<String>,
-    },
 
     /// Submit homework.
     Submit {
@@ -674,20 +486,6 @@ enum Commands {
         #[arg(short, long, default_value = "")]
         comment: String,
     },
-}
-
-#[derive(Subcommand)]
-enum CompletionShell {
-    /// Print zsh completion script.
-    Zsh,
-}
-
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
-enum CompletionKind {
-    Homework,
-    Announcement,
-    File,
-    Course,
 }
 
 #[derive(Subcommand)]
@@ -733,9 +531,7 @@ pub async fn run() -> Result<()> {
             None => cmd_announcement(course, json).await,
         },
         Commands::Debug => cmd_debug().await,
-        Commands::Completion { shell } => cmd_completion(shell),
         Commands::Courses => cmd_courses(json).await,
-        Commands::Complete { kind, prefix } => cmd_complete(kind, prefix),
         Commands::File { command } => match command {
             FileCommands::Ls { course } => cmd_file_ls(course, json).await,
             FileCommands::Show { file_id } => cmd_file_show(file_id, json).await,
@@ -764,10 +560,6 @@ async fn prepare() -> Result<(Client, Vec<Course>)> {
     let client = login_only().await?;
     let semester = client.current_semester().await?;
     let courses = client.course_list(&semester).await?;
-    write_completion_cache(
-        CompletionKind::Course,
-        &completion_items_for_courses(&courses),
-    );
     Ok((client, courses))
 }
 
@@ -815,10 +607,6 @@ async fn courses_with_prev(client: &Client) -> Result<Vec<Course>> {
             courses.append(&mut pc);
         }
     }
-    write_completion_cache(
-        CompletionKind::Course,
-        &completion_items_for_courses(&courses),
-    );
     Ok(courses)
 }
 
@@ -841,10 +629,6 @@ async fn cmd_homework(
     };
     let mut hws = client.homework_list(&courses).await?;
     let now = chrono::Local::now();
-    write_completion_cache(
-        CompletionKind::Homework,
-        &completion_items_for_homework(&hws),
-    );
     if let Some(ids) = &target_course_ids {
         hws.retain(|h| ids.iter().any(|id| id == &h.course_id));
     }
@@ -892,21 +676,6 @@ async fn cmd_homework(
 async fn cmd_debug() -> Result<()> {
     let (client, courses) = prepare().await?;
     client.debug_dump(&courses).await
-}
-
-fn cmd_completion(shell: CompletionShell) -> Result<()> {
-    match shell {
-        CompletionShell::Zsh => print!("{}", zsh_completion_script()),
-    }
-    Ok(())
-}
-
-fn cmd_complete(kind: CompletionKind, prefix: Option<String>) -> Result<()> {
-    let prefix = prefix.unwrap_or_default();
-    for item in filter_completion_items(&read_completion_cache(kind), &prefix) {
-        println!("{}", format_completion_line(&item));
-    }
-    Ok(())
 }
 
 async fn cmd_courses(json: bool) -> Result<()> {
@@ -1051,11 +820,6 @@ async fn cmd_announcement(course_filter: Option<String>, json: bool) -> Result<(
         .cloned()
         .collect::<Vec<_>>();
     let notes = client.notification_list(&target_courses).await?;
-    write_completion_cache(
-        CompletionKind::Announcement,
-        &completion_items_for_announcements(&notes),
-    );
-
     if json {
         println!("{}", serde_json::to_string_pretty(&notes)?);
         return Ok(());
@@ -1119,11 +883,6 @@ async fn cmd_file_ls(filter: Option<String>, json: bool) -> Result<()> {
         .filter_map(|(_, r)| r.as_ref().ok())
         .flat_map(|files| files.iter().cloned())
         .collect::<Vec<_>>();
-    write_completion_cache(
-        CompletionKind::File,
-        &completion_items_for_files(&all_files),
-    );
-
     if json {
         println!("{}", serde_json::to_string_pretty(&all_files)?);
         return Ok(());
@@ -1255,10 +1014,9 @@ async fn cmd_submit(homework_id: String, file: PathBuf, comment: String) -> Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        completion_items_for_courses, completion_items_for_homework, filter_completion_items,
-        filter_courses, format_completion_line, prev_semester, render_announcement_table,
-        render_course_file_table, render_course_table, render_homework_table, render_table,
-        resolve_item_by_id, zsh_completion_script, Cli, TableCell,
+        filter_courses, prev_semester, render_announcement_table, render_course_file_table,
+        render_course_table, render_homework_table, render_table, resolve_item_by_id, Cli,
+        TableCell,
     };
     use crate::models::{short_id, Course, CourseFile, Homework, HomeworkStatus, Notification};
     use chrono::TimeZone;
@@ -1378,6 +1136,7 @@ mod tests {
         let help = String::from_utf8(help).unwrap();
 
         assert!(help.contains("Tsinghua Web Learning command-line client"));
+        assert!(!help.contains("completion"));
         assert!(!help.contains("清华"));
         assert!(!help.contains("作业"));
     }
@@ -1499,19 +1258,6 @@ mod tests {
     }
 
     #[test]
-    fn course_completion_items_match_short_id_prefix() {
-        let c = course("course-one", "Operating Systems", "Teacher");
-        let prefix = &short_id(&c.id)[..3];
-        let items = completion_items_for_courses(std::slice::from_ref(&c));
-        let matches = filter_completion_items(&items, prefix);
-
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].value, short_id(&c.id));
-        assert!(matches[0].description.contains("Operating Systems"));
-        assert!(matches[0].description.contains("Teacher"));
-    }
-
-    #[test]
     fn course_filter_accepts_unique_short_id_prefix() {
         let courses = vec![
             course("course-one", "数学分析(2)", "陈大广"),
@@ -1558,34 +1304,6 @@ mod tests {
     }
 
     #[test]
-    fn completion_items_match_short_id_prefix() {
-        let hw = homework(
-            "student-homework-one",
-            "Data Structures",
-            "Heap lab",
-            None,
-            None,
-            HomeworkStatus::Pending,
-        );
-        let prefix = &short_id(&hw.student_homework_id)[..3];
-        let items = completion_items_for_homework(std::slice::from_ref(&hw));
-        let matches = filter_completion_items(&items, prefix);
-
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].value, short_id(&hw.student_homework_id));
-        assert!(matches[0].description.contains("Data Structures"));
-        assert!(matches[0].description.contains("Heap lab"));
-        assert_eq!(
-            format_completion_line(&matches[0]),
-            format!(
-                "{}\t{}",
-                short_id(&hw.student_homework_id),
-                matches[0].description
-            )
-        );
-    }
-
-    #[test]
     fn id_prefix_resolution_rejects_ambiguous_matches() {
         let first = homework(
             "student-homework-one",
@@ -1629,15 +1347,5 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("ambiguous"));
-    }
-
-    #[test]
-    fn zsh_completion_script_uses_cached_candidate_command() {
-        let script = zsh_completion_script();
-
-        assert!(script.contains("#compdef thu-learn"));
-        assert!(script.contains("__complete"));
-        assert!(script.contains("_thu_learn_cached_ids homework"));
-        assert!(script.contains("_thu_learn_cached_ids file"));
     }
 }

@@ -74,28 +74,6 @@ thu-learn submit <id> ./hw.pdf -c "submission note"
 thu-learn hw --json
 ```
 
-## Shell Completion
-
-For zsh, install the completion script into a directory on `fpath`:
-
-```bash
-mkdir -p ~/.zfunc
-thu-learn completion zsh > ~/.zfunc/_thu-learn
-```
-
-Then add this to `~/.zshrc` if `~/.zfunc` is not already on `fpath`:
-
-```bash
-fpath=(~/.zfunc $fpath)
-autoload -Uz compinit
-compinit
-```
-
-ID completion is cache-backed and never contacts Learn while you press Tab. Run
-`thu-learn courses`, `thu-learn hw`, `thu-learn ann`, or `thu-learn f ls` once to
-refresh the local candidate cache before completing course, homework,
-announcement, or file IDs.
-
 Notes:
 
 * Human output uses color when stdout supports it; `--json` output is plain structured data.
