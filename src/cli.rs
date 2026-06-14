@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use crate::browser_login;
@@ -315,6 +316,221 @@ fn render_course_file_table(files: &[crate::models::CourseFile]) -> String {
     render_table(&["ID", "Title", "Size", "Uploaded"], &rows)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct CompletionItem {
+    value: String,
+    description: String,
+}
+
+fn completion_items_for_homework(hws: &[crate::models::Homework]) -> Vec<CompletionItem> {
+    hws.iter()
+        .map(|h| CompletionItem {
+            value: short_id(&h.student_homework_id),
+            description: format!("{} | {}", h.course_name, h.title),
+        })
+        .collect()
+}
+
+fn completion_items_for_announcements(
+    notes: &[crate::models::Notification],
+) -> Vec<CompletionItem> {
+    notes
+        .iter()
+        .map(|n| CompletionItem {
+            value: short_id(&n.id),
+            description: format!("{} | {}", n.course_name, n.title),
+        })
+        .collect()
+}
+
+fn completion_items_for_files(files: &[crate::models::CourseFile]) -> Vec<CompletionItem> {
+    files
+        .iter()
+        .map(|f| CompletionItem {
+            value: short_id(&f.id),
+            description: format!("{} | {}", f.course_name, f.title),
+        })
+        .collect()
+}
+
+fn filter_completion_items(items: &[CompletionItem], prefix: &str) -> Vec<CompletionItem> {
+    let mut matches = items
+        .iter()
+        .filter(|item| item.value.starts_with(prefix))
+        .cloned()
+        .collect::<Vec<_>>();
+    matches.sort_by(|a, b| a.value.cmp(&b.value));
+    matches
+}
+
+enum IdResolution<'a, T> {
+    Found(&'a T),
+    NotFound,
+    Ambiguous(Vec<String>),
+}
+
+fn resolve_item_prefix<'a, T>(
+    items: &'a [T],
+    query: &str,
+    id_of: impl Fn(&T) -> &str,
+) -> IdResolution<'a, T> {
+    let exact = items
+        .iter()
+        .filter(|item| {
+            let full = id_of(item);
+            full == query || short_id(full) == query
+        })
+        .collect::<Vec<_>>();
+    if let Some(item) = exact.first() {
+        return IdResolution::Found(item);
+    }
+
+    let prefix_matches = if query.len() < 7 {
+        items
+            .iter()
+            .filter(|item| short_id(id_of(item)).starts_with(query))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    match prefix_matches.as_slice() {
+        [item] => IdResolution::Found(item),
+        [] => IdResolution::NotFound,
+        many => IdResolution::Ambiguous(
+            many.iter()
+                .map(|item| short_id(id_of(item)))
+                .collect::<Vec<_>>(),
+        ),
+    }
+}
+
+fn resolve_item_by_id<'a, T>(
+    items: &'a [T],
+    query: &str,
+    id_of: impl Fn(&T) -> &str,
+    name: &str,
+    hint: &str,
+) -> Result<&'a T> {
+    match resolve_item_prefix(items, query, id_of) {
+        IdResolution::Found(item) => Ok(item),
+        IdResolution::NotFound => anyhow::bail!("{name} ID not found: {query} ({hint})"),
+        IdResolution::Ambiguous(candidates) => {
+            let candidates = candidates.join(", ");
+            anyhow::bail!("{name} ID prefix is ambiguous: {query} (candidates: {candidates})")
+        }
+    }
+}
+
+fn format_completion_line(item: &CompletionItem) -> String {
+    format!("{}\t{}", item.value, item.description.replace('\t', " "))
+}
+
+fn completion_cache_key(kind: CompletionKind) -> &'static str {
+    match kind {
+        CompletionKind::Homework => "completion_homework",
+        CompletionKind::Announcement => "completion_announcement",
+        CompletionKind::File => "completion_file",
+    }
+}
+
+fn write_completion_cache(kind: CompletionKind, items: &[CompletionItem]) {
+    crate::cache::write_json(completion_cache_key(kind), items);
+}
+
+fn read_completion_cache(kind: CompletionKind) -> Vec<CompletionItem> {
+    crate::cache::read_json(completion_cache_key(kind)).unwrap_or_default()
+}
+
+fn zsh_completion_script() -> &'static str {
+    r#"#compdef thu-learn
+
+_thu_learn_cached_ids() {
+  local kind="$1"
+  local -a lines
+  lines=("${(@f)$("${words[1]}" __complete "$kind" "$PREFIX" 2>/dev/null)}")
+  if (( ${#lines} )); then
+    local -a candidates
+    local line value desc
+    for line in "${lines[@]}"; do
+      value="${line%%$'\t'*}"
+      desc="${line#*$'\t'}"
+      candidates+=("${value}:${desc}")
+    done
+    _describe -t "thu-learn-${kind}-ids" "${kind} ids" candidates
+  fi
+}
+
+_thu_learn() {
+  local -a commands file_commands
+  commands=(
+    "login:log in through Chrome"
+    "homework:list or show homework"
+    "hw:list or show homework"
+    "announcement:list or show announcements"
+    "ann:list or show announcements"
+    "file:list, show, or download course files"
+    "f:list, show, or download course files"
+    "submit:submit homework"
+    "completion:print shell completion scripts"
+  )
+  file_commands=(
+    "ls:list course files"
+    "show:show file details"
+    "get:download a course file"
+  )
+
+  case "$words[2]" in
+    homework|hw)
+      if (( CURRENT == 3 )); then
+        _thu_learn_cached_ids homework
+      else
+        _arguments '*::arg:->args'
+      fi
+      ;;
+    announcement|ann)
+      if (( CURRENT == 3 )); then
+        _thu_learn_cached_ids announcement
+      else
+        _arguments '*::arg:->args'
+      fi
+      ;;
+    submit)
+      if (( CURRENT == 3 )); then
+        _thu_learn_cached_ids homework
+      elif (( CURRENT == 4 )); then
+        _files
+      else
+        _arguments '*::arg:->args'
+      fi
+      ;;
+    file|f)
+      if (( CURRENT == 3 )); then
+        _describe -t thu-learn-file-commands 'file command' file_commands
+      elif (( CURRENT == 4 )) && [[ "$words[3]" == (show|get) ]]; then
+        _thu_learn_cached_ids file
+      else
+        _arguments '*::arg:->args'
+      fi
+      ;;
+    completion)
+      if (( CURRENT == 3 )); then
+        _values 'shell' zsh
+      fi
+      ;;
+    *)
+      if (( CURRENT == 2 )); then
+        _describe -t thu-learn-commands 'command' commands
+      else
+        _arguments '*::arg:->args'
+      fi
+      ;;
+  esac
+}
+
+_thu_learn "$@"
+"#
+}
+
 #[derive(Parser)]
 #[command(
     name = "thu-learn",
@@ -364,6 +580,19 @@ enum Commands {
     #[command(hide = true)]
     Debug,
 
+    /// Print shell completion scripts.
+    Completion {
+        #[command(subcommand)]
+        shell: CompletionShell,
+    },
+
+    /// Print cached completion candidates.
+    #[command(name = "__complete", hide = true)]
+    Complete {
+        kind: CompletionKind,
+        prefix: Option<String>,
+    },
+
     /// Submit homework.
     Submit {
         /// Student homework ID (`xszyid`), visible in `thu-learn hw -a`.
@@ -374,6 +603,19 @@ enum Commands {
         #[arg(short, long, default_value = "")]
         comment: String,
     },
+}
+
+#[derive(Subcommand)]
+enum CompletionShell {
+    /// Print zsh completion script.
+    Zsh,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum CompletionKind {
+    Homework,
+    Announcement,
+    File,
 }
 
 #[derive(Subcommand)]
@@ -418,6 +660,8 @@ pub async fn run() -> Result<()> {
             None => cmd_announcement(json).await,
         },
         Commands::Debug => cmd_debug().await,
+        Commands::Completion { shell } => cmd_completion(shell),
+        Commands::Complete { kind, prefix } => cmd_complete(kind, prefix),
         Commands::File { command } => match command {
             FileCommands::Ls { course } => cmd_file_ls(course, json).await,
             FileCommands::Show { file_id } => cmd_file_show(file_id, json).await,
@@ -501,6 +745,10 @@ async fn cmd_homework(all: bool, overdue: bool, json: bool) -> Result<()> {
     let courses = courses_with_prev(&client).await?;
     let mut hws = client.homework_list(&courses).await?;
     let now = chrono::Local::now();
+    write_completion_cache(
+        CompletionKind::Homework,
+        &completion_items_for_homework(&hws),
+    );
 
     if !all {
         // Default to pending homework.
@@ -547,16 +795,32 @@ async fn cmd_debug() -> Result<()> {
     client.debug_dump(&courses).await
 }
 
+fn cmd_completion(shell: CompletionShell) -> Result<()> {
+    match shell {
+        CompletionShell::Zsh => print!("{}", zsh_completion_script()),
+    }
+    Ok(())
+}
+
+fn cmd_complete(kind: CompletionKind, prefix: Option<String>) -> Result<()> {
+    let prefix = prefix.unwrap_or_default();
+    for item in filter_completion_items(&read_completion_cache(kind), &prefix) {
+        println!("{}", format_completion_line(&item));
+    }
+    Ok(())
+}
+
 async fn cmd_homework_show(xszyid: String, download: Option<PathBuf>, json: bool) -> Result<()> {
     let client = login_only().await?;
     let courses = courses_with_prev(&client).await?;
     let hws = client.homework_list(&courses).await?;
-    let hw = hws
-        .iter()
-        .find(|h| short_id(&h.student_homework_id) == xszyid || h.student_homework_id == xszyid)
-        .ok_or_else(|| {
-            anyhow::anyhow!("Homework ID not found: {xszyid} (run `thu-learn hw -a` to list IDs)")
-        })?;
+    let hw = resolve_item_by_id(
+        &hws,
+        &xszyid,
+        |h| h.student_homework_id.as_str(),
+        "Homework",
+        "run `thu-learn hw -a` to list IDs",
+    )?;
 
     // Fetch details and attachments concurrently.
     let (desc, atts) = futures::join!(
@@ -669,6 +933,10 @@ async fn download_attachments(
 async fn cmd_announcement(json: bool) -> Result<()> {
     let (client, courses) = prepare().await?;
     let notes = client.notification_list(&courses).await?;
+    write_completion_cache(
+        CompletionKind::Announcement,
+        &completion_items_for_announcements(&notes),
+    );
 
     if json {
         println!("{}", serde_json::to_string_pretty(&notes)?);
@@ -686,12 +954,13 @@ async fn cmd_announcement(json: bool) -> Result<()> {
 async fn cmd_announcement_show(id: String, json: bool) -> Result<()> {
     let (client, courses) = prepare().await?;
     let notes = client.notification_list(&courses).await?;
-    let n = notes
-        .iter()
-        .find(|n| short_id(&n.id) == id || n.id == id)
-        .ok_or_else(|| {
-            anyhow::anyhow!("Announcement ID not found: {id} (run `thu-learn ann` to list IDs)")
-        })?;
+    let n = resolve_item_by_id(
+        &notes,
+        &id,
+        |n| n.id.as_str(),
+        "Announcement",
+        "run `thu-learn ann` to list IDs",
+    )?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(n)?);
@@ -730,14 +999,18 @@ async fn cmd_file_ls(filter: Option<String>, json: bool) -> Result<()> {
         async move { (course, client_ref.file_list(course).await) }
     });
     let results = futures::future::join_all(futs).await;
+    let all_files = results
+        .iter()
+        .filter_map(|(_, r)| r.as_ref().ok())
+        .flat_map(|files| files.iter().cloned())
+        .collect::<Vec<_>>();
+    write_completion_cache(
+        CompletionKind::File,
+        &completion_items_for_files(&all_files),
+    );
 
     if json {
-        let all: Vec<&crate::models::CourseFile> = results
-            .iter()
-            .filter_map(|(_, r)| r.as_ref().ok())
-            .flatten()
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&all)?);
+        println!("{}", serde_json::to_string_pretty(&all_files)?);
         return Ok(());
     }
 
@@ -769,12 +1042,13 @@ async fn fetch_all_files(client: &Client, courses: &[Course]) -> Vec<crate::mode
 async fn cmd_file_show(id: String, json: bool) -> Result<()> {
     let (client, courses) = prepare().await?;
     let files = fetch_all_files(&client, &courses).await;
-    let f = files
-        .iter()
-        .find(|f| short_id(&f.id) == id || f.id == id)
-        .ok_or_else(|| {
-            anyhow::anyhow!("File ID not found: {id} (run `thu-learn f ls` to list IDs)")
-        })?;
+    let f = resolve_item_by_id(
+        &files,
+        &id,
+        |f| f.id.as_str(),
+        "File",
+        "run `thu-learn f ls` to list IDs",
+    )?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(f)?);
@@ -804,13 +1078,15 @@ async fn cmd_file_get(file_id: String, out: Option<PathBuf>) -> Result<()> {
     } else {
         let (client, courses) = prepare().await?;
         let files = fetch_all_files(&client, &courses).await;
-        let wjid = files
-            .iter()
-            .find(|f| short_id(&f.id) == file_id || f.id == file_id)
-            .map(|f| f.id.clone())
-            .ok_or_else(|| {
-                anyhow::anyhow!("File ID not found: {file_id} (run `thu-learn f ls` to list IDs)")
-            })?;
+        let wjid = resolve_item_by_id(
+            &files,
+            &file_id,
+            |f| f.id.as_str(),
+            "File",
+            "run `thu-learn f ls` to list IDs",
+        )?
+        .id
+        .clone();
         (client, wjid)
     };
 
@@ -845,13 +1121,16 @@ async fn cmd_submit(homework_id: String, file: PathBuf, comment: String) -> Resu
     // Resolve short IDs to full `xszyid` values when possible.
     let courses = courses_with_prev(&client).await?;
     let hws = client.homework_list(&courses).await?;
-    let xszyid = hws
-        .iter()
-        .find(|h| {
-            short_id(&h.student_homework_id) == homework_id || h.student_homework_id == homework_id
-        })
-        .map(|h| h.student_homework_id.clone())
-        .unwrap_or(homework_id); // Preserve full IDs that are not in the list.
+    let xszyid = match resolve_item_prefix(&hws, &homework_id, |h| h.student_homework_id.as_str()) {
+        IdResolution::Found(h) => h.student_homework_id.clone(),
+        IdResolution::NotFound => homework_id, // Preserve full IDs that are not in the list.
+        IdResolution::Ambiguous(candidates) => {
+            let candidates = candidates.join(", ");
+            anyhow::bail!(
+                "Homework ID prefix is ambiguous: {homework_id} (candidates: {candidates})"
+            );
+        }
+    };
 
     client.submit_homework(&xszyid, &file, &comment).await?;
     println!("Submission succeeded.");
@@ -861,8 +1140,9 @@ async fn cmd_submit(homework_id: String, file: PathBuf, comment: String) -> Resu
 #[cfg(test)]
 mod tests {
     use super::{
+        completion_items_for_homework, filter_completion_items, format_completion_line,
         prev_semester, render_announcement_table, render_course_file_table, render_homework_table,
-        render_table, Cli, TableCell,
+        render_table, resolve_item_by_id, zsh_completion_script, Cli, TableCell,
     };
     use crate::models::{short_id, CourseFile, Homework, HomeworkStatus, Notification};
     use chrono::TimeZone;
@@ -1082,5 +1362,89 @@ mod tests {
         assert!(table.contains("Lecture 讲义.pdf"));
         assert!(table.contains("1.5 MB"));
         assert!(table.contains("2026-06-02 10:30"));
+    }
+
+    #[test]
+    fn completion_items_match_short_id_prefix() {
+        let hw = homework(
+            "student-homework-one",
+            "Data Structures",
+            "Heap lab",
+            None,
+            None,
+            HomeworkStatus::Pending,
+        );
+        let prefix = &short_id(&hw.student_homework_id)[..3];
+        let items = completion_items_for_homework(std::slice::from_ref(&hw));
+        let matches = filter_completion_items(&items, prefix);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].value, short_id(&hw.student_homework_id));
+        assert!(matches[0].description.contains("Data Structures"));
+        assert!(matches[0].description.contains("Heap lab"));
+        assert_eq!(
+            format_completion_line(&matches[0]),
+            format!(
+                "{}\t{}",
+                short_id(&hw.student_homework_id),
+                matches[0].description
+            )
+        );
+    }
+
+    #[test]
+    fn id_prefix_resolution_rejects_ambiguous_matches() {
+        let first = homework(
+            "student-homework-one",
+            "Data Structures",
+            "Heap lab",
+            None,
+            None,
+            HomeworkStatus::Pending,
+        );
+        let first_short = short_id(&first.student_homework_id);
+        let second = homework(
+            "student-homework-two",
+            "Computer Networks",
+            "Protocol report",
+            None,
+            None,
+            HomeworkStatus::Pending,
+        );
+        let shared_prefix = first_short
+            .chars()
+            .next()
+            .expect("short IDs are never empty")
+            .to_string();
+        let second_id = (0..1000)
+            .map(|idx| format!("second-homework-{idx}"))
+            .find(|id| short_id(id).starts_with(&shared_prefix))
+            .expect("one hex-prefix collision should exist in 1000 attempts");
+        let second = Homework {
+            student_homework_id: second_id,
+            ..second
+        };
+        let items = vec![first, second];
+
+        let err = resolve_item_by_id(
+            &items,
+            &shared_prefix,
+            |h| h.student_homework_id.as_str(),
+            "Homework",
+            "run `thu-learn hw -a` to list IDs",
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn zsh_completion_script_uses_cached_candidate_command() {
+        let script = zsh_completion_script();
+
+        assert!(script.contains("#compdef thu-learn"));
+        assert!(script.contains("__complete"));
+        assert!(script.contains("_thu_learn_cached_ids homework"));
+        assert!(script.contains("_thu_learn_cached_ids file"));
     }
 }
