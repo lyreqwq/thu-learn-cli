@@ -552,7 +552,7 @@ enum Commands {
     /// List homework, or show one homework item when an ID is provided.
     #[command(visible_alias = "hw")]
     Homework {
-        /// Homework ID (`xszyid`) to show details and attachments.
+        /// Homework short ID, unique short-ID prefix, or full `xszyid`.
         id: Option<String>,
         /// Show all homework, including submitted, graded, and overdue items.
         #[arg(short, long)]
@@ -567,7 +567,7 @@ enum Commands {
     /// List course announcements, or show one announcement when an ID is provided.
     #[command(visible_alias = "ann")]
     Announcement {
-        /// Announcement ID to show the full body.
+        /// Announcement short ID, unique short-ID prefix, or full ID.
         id: Option<String>,
     },
     /// List, show, or download course files.
@@ -595,7 +595,7 @@ enum Commands {
 
     /// Submit homework.
     Submit {
-        /// Student homework ID (`xszyid`), visible in `thu-learn hw -a`.
+        /// Homework short ID, unique short-ID prefix, or full `xszyid`.
         homework_id: String,
         /// File path to submit.
         file: PathBuf,
@@ -628,12 +628,12 @@ enum FileCommands {
     },
     /// Show file details including type, size, and description.
     Show {
-        /// File ID shown by `thu-learn f ls`.
+        /// File short ID, unique short-ID prefix, or full ID.
         file_id: String,
     },
     /// Download a course file.
     Get {
-        /// File ID shown by `thu-learn f ls`.
+        /// File short ID, unique short-ID prefix, or full ID.
         file_id: String,
         /// Output path. Defaults to the server-provided file name in the current directory.
         #[arg(short, long)]
