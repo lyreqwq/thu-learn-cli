@@ -509,8 +509,6 @@ fn apply_html_tag(raw: &str, out: &mut String, link: &mut Option<LinkBuffer>) {
             }
         } else if is_block_html_tag(&name) {
             push_html_break(out, link, 2);
-        } else if name == "li" {
-            push_html_break(out, link, 1);
         }
         return;
     }
@@ -807,6 +805,27 @@ mod tests {
         assert!(text.contains("\n课题二"));
         assert!(!text.contains("<a"));
         assert!(!text.contains("\\。"));
+    }
+
+    #[test]
+    fn strip_html_formats_homework_detail_lists_and_links() {
+        let html = concat!(
+            "&lt;p&gt;请完成以下任务：&lt;/p&gt;",
+            "&lt;ul&gt;",
+            "&lt;li&gt;阅读README&lt;/li&gt;",
+            "&lt;li&gt;提交报告&lt;/li&gt;",
+            "&lt;/ul&gt;",
+            "&lt;p&gt;参考链接：",
+            "&lt;a href=&quot;https://learn.tsinghua.edu.cn/ref&quot;&gt;说明文档&lt;/a&gt;",
+            "&lt;/p&gt;",
+        );
+
+        let text = strip_html(html);
+
+        assert_eq!(
+            text,
+            "请完成以下任务：\n\n- 阅读README\n- 提交报告\n\n参考链接：说明文档 (https://learn.tsinghua.edu.cn/ref)"
+        );
     }
 
     #[test]
