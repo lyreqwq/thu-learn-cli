@@ -418,6 +418,10 @@ fn filter_courses<'a>(courses: &'a [Course], query: Option<&str>) -> Result<Vec<
     }
 }
 
+fn detail_section(title: &str, body: &str) -> String {
+    format!("## {title}\n{body}")
+}
+
 #[derive(Parser)]
 #[command(
     name = "thu-learn",
@@ -758,17 +762,17 @@ async fn cmd_homework_show(xszyid: String, download: Option<PathBuf>, json: bool
     }
 
     if !desc.is_empty() {
-        println!("\nDescription\n{desc}");
+        println!("\n{}", detail_section("Description", &desc));
     }
 
     if !hw.comment.is_empty() {
-        println!("\nComment\n{}", hw.comment);
+        println!("\n{}", detail_section("Comment", &hw.comment));
     }
 
     if atts.is_empty() {
         println!("\n(No attachments)");
     } else {
-        println!("\nAttachments");
+        println!("\n## Attachments");
         for a in &atts {
             println!("  [{}] {}", a.section, a.filename);
         }
@@ -862,7 +866,7 @@ async fn cmd_announcement_show(id: String, json: bool) -> Result<()> {
     if n.content.is_empty() {
         println!("\n(No body)");
     } else {
-        println!("\n{}", n.content);
+        println!("\n{}", detail_section("Description", &n.content));
     }
     Ok(())
 }
@@ -939,7 +943,7 @@ async fn cmd_file_show(id: String, json: bool) -> Result<()> {
         dim(&format!("{} · {} · {}", f.file_type, f.size, f.upload_time))
     );
     if !f.description.is_empty() {
-        println!("\n{}", f.description);
+        println!("\n{}", detail_section("Description", &f.description));
     }
     println!("\nDownload: thu-learn f get {}", short_id(&f.id));
     Ok(())
@@ -1014,9 +1018,9 @@ async fn cmd_submit(homework_id: String, file: PathBuf, comment: String) -> Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        filter_courses, prev_semester, render_announcement_table, render_course_file_table,
-        render_course_table, render_homework_table, render_table, resolve_item_by_id, Cli,
-        TableCell,
+        detail_section, filter_courses, prev_semester, render_announcement_table,
+        render_course_file_table, render_course_table, render_homework_table, render_table,
+        resolve_item_by_id, Cli, TableCell,
     };
     use crate::models::{short_id, Course, CourseFile, Homework, HomeworkStatus, Notification};
     use chrono::TimeZone;
@@ -1347,5 +1351,13 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn detail_section_uses_markdown_heading() {
+        assert_eq!(
+            detail_section("Description", "Body"),
+            "## Description\nBody"
+        );
     }
 }
