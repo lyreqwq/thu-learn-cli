@@ -449,22 +449,245 @@ fn parse_homework_attachments(html: &str) -> Vec<HomeworkAttachment> {
 /// Removes tags and decodes entities to make announcement or homework HTML readable.
 /// `ggnrStr` contains entity-escaped HTML, for example `&lt;p&gt;Hello&lt;/p&gt;`.
 fn strip_html(s: &str) -> String {
-    // First decode one layer so escaped tags become real tags.
     let unescaped = decode(s);
-    // Drop tags.
     let mut out = String::new();
-    let mut in_tag = false;
-    for c in unescaped.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(c),
-            _ => {}
+    let mut chars = unescaped.chars().peekable();
+    let mut link: Option<LinkBuffer> = None;
+
+    while let Some(c) = chars.next() {
+        if c == '<' {
+            let mut tag = String::new();
+            let mut closed = false;
+            for t in chars.by_ref() {
+                if t == '>' {
+                    closed = true;
+                    break;
+                }
+                tag.push(t);
+            }
+            if closed {
+                apply_html_tag(&tag, &mut out, &mut link);
+            } else {
+                push_html_text(&mut out, &mut link, "<");
+                push_html_text(&mut out, &mut link, &tag);
+            }
+        } else {
+            push_html_char(&mut out, &mut link, c);
         }
     }
-    // Decode any remaining entities such as &nbsp; and collapse whitespace.
-    let out = decode(&out);
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+
+    if let Some(link) = link.take() {
+        push_rendered_link(&mut out, link);
+    }
+
+    normalize_rendered_html_text(&decode(&out))
+}
+
+struct LinkBuffer {
+    href: String,
+    text: String,
+}
+
+fn apply_html_tag(raw: &str, out: &mut String, link: &mut Option<LinkBuffer>) {
+    let tag = raw.trim();
+    if tag.is_empty() || tag.starts_with('!') {
+        return;
+    }
+
+    let closing = tag.starts_with('/');
+    let body = tag.trim_start_matches('/').trim();
+    let name_end = body
+        .find(|c: char| c.is_whitespace() || c == '/')
+        .unwrap_or(body.len());
+    let name = body[..name_end].to_ascii_lowercase();
+    let attrs = body[name_end..].trim();
+
+    if closing {
+        if name == "a" {
+            if let Some(link) = link.take() {
+                push_rendered_link(out, link);
+            }
+        } else if is_block_html_tag(&name) {
+            push_html_break(out, link, 2);
+        } else if name == "li" {
+            push_html_break(out, link, 1);
+        }
+        return;
+    }
+
+    match name.as_str() {
+        "br" => push_html_break(out, link, 1),
+        "hr" => push_html_break(out, link, 2),
+        "li" => {
+            push_html_break(out, link, 1);
+            push_html_text(out, link, "- ");
+        }
+        "a" => {
+            if let Some(current) = link.take() {
+                push_rendered_link(out, current);
+            }
+            if let Some(href) = html_attr(attrs, "href") {
+                *link = Some(LinkBuffer {
+                    href,
+                    text: String::new(),
+                });
+            }
+        }
+        _ if is_block_html_tag(&name) => push_html_break(out, link, 2),
+        _ => {}
+    }
+}
+
+fn push_rendered_link(out: &mut String, link: LinkBuffer) {
+    let text = normalize_inline_text(&link.text);
+    let href = link.href.trim();
+    if href.is_empty() {
+        out.push_str(&text);
+    } else if text.is_empty() || text == href {
+        out.push_str(href);
+    } else {
+        out.push_str(&format!("{text} ({href})"));
+    }
+}
+
+fn push_html_char(out: &mut String, link: &mut Option<LinkBuffer>, c: char) {
+    if let Some(link) = link {
+        link.text.push(c);
+    } else {
+        out.push(c);
+    }
+}
+
+fn push_html_text(out: &mut String, link: &mut Option<LinkBuffer>, text: &str) {
+    if let Some(link) = link {
+        link.text.push_str(text);
+    } else {
+        out.push_str(text);
+    }
+}
+
+fn push_html_break(out: &mut String, link: &mut Option<LinkBuffer>, count: usize) {
+    for _ in 0..count {
+        push_html_char(out, link, '\n');
+    }
+}
+
+fn is_block_html_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "address"
+            | "article"
+            | "aside"
+            | "blockquote"
+            | "div"
+            | "dl"
+            | "fieldset"
+            | "figcaption"
+            | "figure"
+            | "footer"
+            | "form"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "header"
+            | "main"
+            | "ol"
+            | "p"
+            | "pre"
+            | "section"
+            | "table"
+            | "tbody"
+            | "td"
+            | "tfoot"
+            | "th"
+            | "thead"
+            | "tr"
+            | "ul"
+    )
+}
+
+fn html_attr(attrs: &str, name: &str) -> Option<String> {
+    let bytes = attrs.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let key_start = i;
+        while i < bytes.len() && is_attr_name_byte(bytes[i]) {
+            i += 1;
+        }
+        if key_start == i {
+            i += 1;
+            continue;
+        }
+        let key = &attrs[key_start..i];
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'=' {
+            continue;
+        }
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let value = if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
+            let quote = bytes[i];
+            i += 1;
+            let value_start = i;
+            while i < bytes.len() && bytes[i] != quote {
+                i += 1;
+            }
+            let value = &attrs[value_start..i];
+            if i < bytes.len() {
+                i += 1;
+            }
+            value
+        } else {
+            let value_start = i;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            &attrs[value_start..i]
+        };
+        if key.eq_ignore_ascii_case(name) {
+            return Some(decode(value));
+        }
+    }
+    None
+}
+
+fn is_attr_name_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':')
+}
+
+fn normalize_rendered_html_text(s: &str) -> String {
+    let mut lines = Vec::new();
+    for line in s.lines() {
+        let line = normalize_inline_text(line);
+        if line.is_empty() {
+            if !lines.last().is_none_or(String::is_empty) {
+                lines.push(String::new());
+            }
+        } else {
+            lines.push(line);
+        }
+    }
+    while lines.first().is_some_and(String::is_empty) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+fn normalize_inline_text(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Decodes the small set of HTML entities seen in Learn responses.
@@ -550,10 +773,40 @@ mod tests {
     fn strip_html_curly_quotes_and_whitespace() {
         assert_eq!(
             strip_html("&lt;p&gt;a&lt;/p&gt;  &lt;p&gt;b&lt;/p&gt;"),
-            "a b"
+            "a\n\nb"
         );
         let q = strip_html("&ldquo;OJ&rdquo;");
         assert!(q.contains('“') && q.contains('”'));
+    }
+
+    #[test]
+    fn strip_html_preserves_announcement_structure_and_links() {
+        let html = concat!(
+            "&lt;p&gt;各位同学好，本课程计划分组开展Project性能优化。&lt;/p&gt;",
+            "&lt;p&gt;每个仓库内包含介绍基本信息的Readme和原始代码code。&lt;/p&gt;",
+            "&lt;p&gt;课题一——数值相对论求解优化：",
+            "&lt;a href=&quot;https://git.tsinghua.edu.cn/shuixr25/amssncku&quot;&gt;",
+            "https://git.tsinghua.edu.cn/shuixr25/amssncku",
+            "&lt;/a&gt;&lt;br&gt;",
+            "课题二——世界模型推理优化：",
+            "&lt;a href=&quot;https://git.tsinghua.edu.cn/shuixr25/unifolm&quot;&gt;",
+            "unifolm",
+            "&lt;/a&gt;&lt;/p&gt;",
+        );
+
+        let text = strip_html(html);
+
+        assert!(text.contains("各位同学好，本课程计划分组开展Project性能优化。"));
+        assert!(text.contains("Readme和原始代码code。"));
+        assert!(text
+            .contains("课题一——数值相对论求解优化：https://git.tsinghua.edu.cn/shuixr25/amssncku"));
+        assert!(text.contains(
+            "课题二——世界模型推理优化：unifolm (https://git.tsinghua.edu.cn/shuixr25/unifolm)"
+        ));
+        assert!(text.contains("\n\n每个仓库内"));
+        assert!(text.contains("\n课题二"));
+        assert!(!text.contains("<a"));
+        assert!(!text.contains("\\。"));
     }
 
     #[test]
