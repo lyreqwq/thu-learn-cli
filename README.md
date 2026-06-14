@@ -45,20 +45,25 @@ List entries show a seven-character short ID. Use that short ID, a unique short-
 ```bash
 thu-learn login
 
+# Courses
+thu-learn courses
+
 # Homework
 thu-learn hw
 thu-learn hw -a
 thu-learn hw --overdue
+thu-learn hw -c <course>
 thu-learn hw <id>
 thu-learn hw <id> -d ./dir
 
 # Announcements
 thu-learn ann
+thu-learn ann -c <course>
 thu-learn ann <id>
 
 # Course files
 thu-learn f ls
-thu-learn f ls -c "Data Structures"
+thu-learn f ls -c <course>
 thu-learn f show <id>
 thu-learn f get <id>
 
@@ -87,8 +92,9 @@ compinit
 ```
 
 ID completion is cache-backed and never contacts Learn while you press Tab. Run
-`thu-learn hw`, `thu-learn ann`, or `thu-learn f ls` once to refresh the local
-candidate cache before completing homework, announcement, or file IDs.
+`thu-learn courses`, `thu-learn hw`, `thu-learn ann`, or `thu-learn f ls` once to
+refresh the local candidate cache before completing course, homework,
+announcement, or file IDs.
 
 Notes:
 

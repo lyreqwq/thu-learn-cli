@@ -299,6 +299,25 @@ fn render_announcement_table(notes: &[crate::models::Notification]) -> String {
     )
 }
 
+fn render_course_table(courses: &[Course]) -> String {
+    let rows = courses
+        .iter()
+        .map(|c| {
+            let id = short_id(&c.id);
+            vec![
+                TableCell::styled(&id, dim(&id)),
+                TableCell::styled(
+                    &c.name,
+                    format!("{}", c.name.if_supports_color(Stdout, |t| t.cyan())),
+                ),
+                TableCell::plain(&c.teacher),
+            ]
+        })
+        .collect::<Vec<_>>();
+
+    render_table(&["ID", "Course", "Teacher"], &rows)
+}
+
 fn render_course_file_table(files: &[crate::models::CourseFile]) -> String {
     let rows = files
         .iter()
@@ -349,6 +368,16 @@ fn completion_items_for_files(files: &[crate::models::CourseFile]) -> Vec<Comple
         .map(|f| CompletionItem {
             value: short_id(&f.id),
             description: format!("{} | {}", f.course_name, f.title),
+        })
+        .collect()
+}
+
+fn completion_items_for_courses(courses: &[Course]) -> Vec<CompletionItem> {
+    courses
+        .iter()
+        .map(|c| CompletionItem {
+            value: short_id(&c.id),
+            description: format!("{} | {}", c.name, c.teacher),
         })
         .collect()
 }
@@ -421,6 +450,32 @@ fn resolve_item_by_id<'a, T>(
     }
 }
 
+fn filter_courses<'a>(courses: &'a [Course], query: Option<&str>) -> Result<Vec<&'a Course>> {
+    let Some(query) = query.filter(|q| !q.is_empty()) else {
+        return Ok(courses.iter().collect());
+    };
+
+    match resolve_item_prefix(courses, query, |c| c.id.as_str()) {
+        IdResolution::Found(course) => Ok(vec![course]),
+        IdResolution::Ambiguous(candidates) => {
+            let candidates = candidates.join(", ");
+            anyhow::bail!("Course ID prefix is ambiguous: {query} (candidates: {candidates})")
+        }
+        IdResolution::NotFound => {
+            let matches = courses
+                .iter()
+                .filter(|c| c.name.contains(query))
+                .collect::<Vec<_>>();
+            if matches.is_empty() {
+                anyhow::bail!(
+                    "Course not found: {query} (run `thu-learn courses` to list course IDs)"
+                );
+            }
+            Ok(matches)
+        }
+    }
+}
+
 fn format_completion_line(item: &CompletionItem) -> String {
     format!("{}\t{}", item.value, item.description.replace('\t', " "))
 }
@@ -430,6 +485,7 @@ fn completion_cache_key(kind: CompletionKind) -> &'static str {
         CompletionKind::Homework => "completion_homework",
         CompletionKind::Announcement => "completion_announcement",
         CompletionKind::File => "completion_file",
+        CompletionKind::Course => "completion_course",
     }
 }
 
@@ -466,6 +522,7 @@ _thu_learn() {
     "login:log in through Chrome"
     "homework:list or show homework"
     "hw:list or show homework"
+    "courses:list course IDs and names"
     "announcement:list or show announcements"
     "ann:list or show announcements"
     "file:list, show, or download course files"
@@ -481,14 +538,18 @@ _thu_learn() {
 
   case "$words[2]" in
     homework|hw)
-      if (( CURRENT == 3 )); then
+      if [[ "${words[CURRENT-1]}" == (-c|--course) ]]; then
+        _thu_learn_cached_ids course
+      elif (( CURRENT == 3 )); then
         _thu_learn_cached_ids homework
       else
         _arguments '*::arg:->args'
       fi
       ;;
     announcement|ann)
-      if (( CURRENT == 3 )); then
+      if [[ "${words[CURRENT-1]}" == (-c|--course) ]]; then
+        _thu_learn_cached_ids course
+      elif (( CURRENT == 3 )); then
         _thu_learn_cached_ids announcement
       else
         _arguments '*::arg:->args'
@@ -506,6 +567,8 @@ _thu_learn() {
     file|f)
       if (( CURRENT == 3 )); then
         _describe -t thu-learn-file-commands 'file command' file_commands
+      elif [[ "$words[3]" == ls ]] && [[ "${words[CURRENT-1]}" == (-c|--course) ]]; then
+        _thu_learn_cached_ids course
       elif (( CURRENT == 4 )) && [[ "$words[3]" == (show|get) ]]; then
         _thu_learn_cached_ids file
       else
@@ -549,11 +612,14 @@ pub struct Cli {
 enum Commands {
     /// Log in through Chrome and save the session locally.
     Login,
-    /// List homework, or show one homework item when an ID is provided.
+    /// List homework, optionally filtered by course, or show one homework item.
     #[command(visible_alias = "hw")]
     Homework {
         /// Homework short ID, unique short-ID prefix, or full `xszyid`.
         id: Option<String>,
+        /// Course short ID, unique short-ID prefix, or course name substring.
+        #[arg(short, long)]
+        course: Option<String>,
         /// Show all homework, including submitted, graded, and overdue items.
         #[arg(short, long)]
         all: bool,
@@ -564,11 +630,14 @@ enum Commands {
         #[arg(short, long)]
         download: Option<PathBuf>,
     },
-    /// List course announcements, or show one announcement when an ID is provided.
+    /// List announcements, optionally filtered by course, or show one announcement.
     #[command(visible_alias = "ann")]
     Announcement {
         /// Announcement short ID, unique short-ID prefix, or full ID.
         id: Option<String>,
+        /// Course short ID, unique short-ID prefix, or course name substring.
+        #[arg(short, long)]
+        course: Option<String>,
     },
     /// List, show, or download course files.
     #[command(visible_alias = "f")]
@@ -585,6 +654,8 @@ enum Commands {
         #[command(subcommand)]
         shell: CompletionShell,
     },
+    /// List courses with short IDs for `--course` filters.
+    Courses,
 
     /// Print cached completion candidates.
     #[command(name = "__complete", hide = true)]
@@ -616,13 +687,14 @@ enum CompletionKind {
     Homework,
     Announcement,
     File,
+    Course,
 }
 
 #[derive(Subcommand)]
 enum FileCommands {
-    /// List course files, optionally filtered by course name.
+    /// List course files, optionally filtered by course.
     Ls {
-        /// Show only courses whose names contain this substring.
+        /// Course short ID, unique short-ID prefix, or course name substring.
         #[arg(short, long)]
         course: Option<String>,
     },
@@ -651,16 +723,18 @@ pub async fn run() -> Result<()> {
             all,
             overdue,
             download,
+            course,
         } => match id {
             Some(xszyid) => cmd_homework_show(xszyid, download, json).await,
-            None => cmd_homework(all, overdue, json).await,
+            None => cmd_homework(all, overdue, course, json).await,
         },
-        Commands::Announcement { id } => match id {
+        Commands::Announcement { id, course } => match id {
             Some(x) => cmd_announcement_show(x, json).await,
-            None => cmd_announcement(json).await,
+            None => cmd_announcement(course, json).await,
         },
         Commands::Debug => cmd_debug().await,
         Commands::Completion { shell } => cmd_completion(shell),
+        Commands::Courses => cmd_courses(json).await,
         Commands::Complete { kind, prefix } => cmd_complete(kind, prefix),
         Commands::File { command } => match command {
             FileCommands::Ls { course } => cmd_file_ls(course, json).await,
@@ -690,6 +764,10 @@ async fn prepare() -> Result<(Client, Vec<Course>)> {
     let client = login_only().await?;
     let semester = client.current_semester().await?;
     let courses = client.course_list(&semester).await?;
+    write_completion_cache(
+        CompletionKind::Course,
+        &completion_items_for_courses(&courses),
+    );
     Ok((client, courses))
 }
 
@@ -737,18 +815,39 @@ async fn courses_with_prev(client: &Client) -> Result<Vec<Course>> {
             courses.append(&mut pc);
         }
     }
+    write_completion_cache(
+        CompletionKind::Course,
+        &completion_items_for_courses(&courses),
+    );
     Ok(courses)
 }
 
-async fn cmd_homework(all: bool, overdue: bool, json: bool) -> Result<()> {
+async fn cmd_homework(
+    all: bool,
+    overdue: bool,
+    course_filter: Option<String>,
+    json: bool,
+) -> Result<()> {
     let client = login_only().await?;
     let courses = courses_with_prev(&client).await?;
+    let target_course_ids = match course_filter.as_deref() {
+        Some(query) => Some(
+            filter_courses(&courses, Some(query))?
+                .into_iter()
+                .map(|c| c.id.clone())
+                .collect::<Vec<_>>(),
+        ),
+        None => None,
+    };
     let mut hws = client.homework_list(&courses).await?;
     let now = chrono::Local::now();
     write_completion_cache(
         CompletionKind::Homework,
         &completion_items_for_homework(&hws),
     );
+    if let Some(ids) = &target_course_ids {
+        hws.retain(|h| ids.iter().any(|id| id == &h.course_id));
+    }
 
     if !all {
         // Default to pending homework.
@@ -807,6 +906,21 @@ fn cmd_complete(kind: CompletionKind, prefix: Option<String>) -> Result<()> {
     for item in filter_completion_items(&read_completion_cache(kind), &prefix) {
         println!("{}", format_completion_line(&item));
     }
+    Ok(())
+}
+
+async fn cmd_courses(json: bool) -> Result<()> {
+    let (_, courses) = prepare().await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&courses)?);
+        return Ok(());
+    }
+    if courses.is_empty() {
+        println!("No courses.");
+        return Ok(());
+    }
+    println!("{}", render_course_table(&courses));
     Ok(())
 }
 
@@ -930,9 +1044,13 @@ async fn download_attachments(
     println!("Downloaded {n} attachments");
 }
 
-async fn cmd_announcement(json: bool) -> Result<()> {
+async fn cmd_announcement(course_filter: Option<String>, json: bool) -> Result<()> {
     let (client, courses) = prepare().await?;
-    let notes = client.notification_list(&courses).await?;
+    let target_courses = filter_courses(&courses, course_filter.as_deref())?
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let notes = client.notification_list(&target_courses).await?;
     write_completion_cache(
         CompletionKind::Announcement,
         &completion_items_for_announcements(&notes),
@@ -987,10 +1105,7 @@ async fn cmd_announcement_show(id: String, json: bool) -> Result<()> {
 
 async fn cmd_file_ls(filter: Option<String>, json: bool) -> Result<()> {
     let (client, courses) = prepare().await?;
-    let targets: Vec<&Course> = courses
-        .iter()
-        .filter(|c| filter.as_ref().is_none_or(|f| c.name.contains(f.as_str())))
-        .collect();
+    let targets = filter_courses(&courses, filter.as_deref())?;
 
     // Fetch each course's files concurrently.
     let client_ref = &client;
@@ -1140,11 +1255,12 @@ async fn cmd_submit(homework_id: String, file: PathBuf, comment: String) -> Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        completion_items_for_homework, filter_completion_items, format_completion_line,
-        prev_semester, render_announcement_table, render_course_file_table, render_homework_table,
-        render_table, resolve_item_by_id, zsh_completion_script, Cli, TableCell,
+        completion_items_for_courses, completion_items_for_homework, filter_completion_items,
+        filter_courses, format_completion_line, prev_semester, render_announcement_table,
+        render_course_file_table, render_course_table, render_homework_table, render_table,
+        resolve_item_by_id, zsh_completion_script, Cli, TableCell,
     };
-    use crate::models::{short_id, CourseFile, Homework, HomeworkStatus, Notification};
+    use crate::models::{short_id, Course, CourseFile, Homework, HomeworkStatus, Notification};
     use chrono::TimeZone;
     use clap::CommandFactory;
 
@@ -1215,6 +1331,14 @@ mod tests {
             publisher: "Teacher".to_string(),
             read,
             content: String::new(),
+        }
+    }
+
+    fn course(id: &str, name: &str, teacher: &str) -> Course {
+        Course {
+            id: id.to_string(),
+            name: name.to_string(),
+            teacher: teacher.to_string(),
         }
     }
 
@@ -1362,6 +1486,75 @@ mod tests {
         assert!(table.contains("Lecture 讲义.pdf"));
         assert!(table.contains("1.5 MB"));
         assert!(table.contains("2026-06-02 10:30"));
+    }
+
+    #[test]
+    fn course_table_renders_short_ids_names_and_teachers() {
+        let c = course("course-one", "数学分析(2)", "陈大广");
+        let table = render_course_table(std::slice::from_ref(&c));
+
+        assert!(table.contains(&short_id(&c.id)));
+        assert!(table.contains("数学分析(2)"));
+        assert!(table.contains("陈大广"));
+    }
+
+    #[test]
+    fn course_completion_items_match_short_id_prefix() {
+        let c = course("course-one", "Operating Systems", "Teacher");
+        let prefix = &short_id(&c.id)[..3];
+        let items = completion_items_for_courses(std::slice::from_ref(&c));
+        let matches = filter_completion_items(&items, prefix);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].value, short_id(&c.id));
+        assert!(matches[0].description.contains("Operating Systems"));
+        assert!(matches[0].description.contains("Teacher"));
+    }
+
+    #[test]
+    fn course_filter_accepts_unique_short_id_prefix() {
+        let courses = vec![
+            course("course-one", "数学分析(2)", "陈大广"),
+            course("course-two", "大学物理(1)(英)", "张定"),
+        ];
+        let prefix = &short_id(&courses[0].id)[..3];
+        let matches = filter_courses(&courses, Some(prefix)).unwrap();
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].id, courses[0].id);
+    }
+
+    #[test]
+    fn course_filter_falls_back_to_name_substring() {
+        let courses = vec![
+            course("course-one", "数学分析(2)", "陈大广"),
+            course("course-two", "离散数学(2)", "耿子瑜"),
+            course("course-three", "大学物理(1)(英)", "张定"),
+        ];
+        let matches = filter_courses(&courses, Some("数学")).unwrap();
+
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].name, "数学分析(2)");
+        assert_eq!(matches[1].name, "离散数学(2)");
+    }
+
+    #[test]
+    fn course_filter_rejects_ambiguous_short_id_prefix() {
+        let first = course("course-one", "Course One", "Teacher");
+        let shared_prefix = short_id(&first.id)
+            .chars()
+            .next()
+            .expect("short IDs are never empty")
+            .to_string();
+        let second_id = (0..1000)
+            .map(|idx| format!("course-collision-{idx}"))
+            .find(|id| short_id(id).starts_with(&shared_prefix))
+            .expect("one hex-prefix collision should exist in 1000 attempts");
+        let courses = vec![first, course(&second_id, "Course Two", "Teacher")];
+
+        let err = filter_courses(&courses, Some(&shared_prefix)).unwrap_err();
+
+        assert!(err.to_string().contains("Course ID prefix is ambiguous"));
     }
 
     #[test]
