@@ -41,24 +41,12 @@ pub async fn login_via_browser() -> Result<Vec<RawCookie>> {
 
     let cookies = wait_for_login(&driver).await;
 
-    let out = cookies
-        .into_iter()
-        .map(|c| {
-            (
-                c.name,
-                c.value,
-                c.domain.unwrap_or_else(|| LEARN_HOST.into()),
-                c.path.unwrap_or_else(|| "/".into()),
-            )
-        })
-        .collect();
-
     driver.quit().await.ok();
-    Ok(out)
+    Ok(cookies)
 }
 
 /// Waits for the authentication redirect cycle, with Enter as a manual fallback.
-async fn wait_for_login(driver: &WebDriver) -> Vec<Cookie> {
+async fn wait_for_login(driver: &WebDriver) -> Vec<RawCookie> {
     // Convert Enter into a cancellable channel event for tokio::select!.
     let (tx, mut enter_rx) = tokio::sync::mpsc::channel::<()>(1);
     std::thread::spawn(move || {
@@ -74,7 +62,7 @@ async fn wait_for_login(driver: &WebDriver) -> Vec<Cookie> {
         tokio::select! {
             // Manual Enter fallback.
             _ = enter_rx.recv() => {
-                return driver.get_all_cookies().await.unwrap_or_default();
+                return capture_cookies(driver).await;
             }
             // Poll the current URL periodically.
             _ = tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)) => {
@@ -88,7 +76,7 @@ async fn wait_for_login(driver: &WebDriver) -> Vec<Cookie> {
                         } else if seen_auth && s.contains(LEARN_HOST) {
                             // After returning to Learn, wait briefly for cookies to settle.
                             tokio::time::sleep(Duration::from_millis(800)).await;
-                            let cs = driver.get_all_cookies().await.unwrap_or_default();
+                            let cs = capture_cookies(driver).await;
                             if !cs.is_empty() {
                                 return cs;
                             }
@@ -96,13 +84,96 @@ async fn wait_for_login(driver: &WebDriver) -> Vec<Cookie> {
                     }
                     Err(_) => {
                         // The browser may have been closed manually.
-                        return driver.get_all_cookies().await.unwrap_or_default();
+                        return capture_cookies(driver).await;
                     }
                 }
                 if waited >= MAX_WAIT_MS {
-                    return driver.get_all_cookies().await.unwrap_or_default();
+                    return capture_cookies(driver).await;
                 }
             }
         }
+    }
+}
+
+async fn capture_cookies(driver: &WebDriver) -> Vec<RawCookie> {
+    if let Ok(value) = driver.cdp().send_raw("Network.getAllCookies", ()).await {
+        let cookies = cdp_cookies_to_raw(&value);
+        if !cookies.is_empty() {
+            return cookies;
+        }
+    }
+    driver
+        .get_all_cookies()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(webdriver_cookie_to_raw)
+        .collect()
+}
+
+fn webdriver_cookie_to_raw(c: Cookie) -> RawCookie {
+    (
+        c.name,
+        c.value,
+        c.domain.unwrap_or_else(|| LEARN_HOST.into()),
+        c.path.unwrap_or_else(|| "/".into()),
+    )
+}
+
+fn cdp_cookies_to_raw(value: &serde_json::Value) -> Vec<RawCookie> {
+    value
+        .get("cookies")
+        .and_then(|cookies| cookies.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            Some((
+                c.get("name")?.as_str()?.to_string(),
+                c.get("value")?.as_str()?.to_string(),
+                c.get("domain")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or(LEARN_HOST)
+                    .to_string(),
+                c.get("path")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("/")
+                    .to_string(),
+            ))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cdp_cookies_to_raw;
+
+    #[test]
+    fn cdp_cookie_capture_keeps_cross_domain_cookies() {
+        let value = serde_json::json!({
+            "cookies": [
+                {
+                    "name": "LEARN",
+                    "value": "learn-session",
+                    "domain": "learn.tsinghua.edu.cn",
+                    "path": "/"
+                },
+                {
+                    "name": "JSESSIONID",
+                    "value": "id-session",
+                    "domain": "id.tsinghua.edu.cn",
+                    "path": "/"
+                }
+            ]
+        });
+
+        let cookies = cdp_cookies_to_raw(&value);
+
+        assert_eq!(cookies.len(), 2);
+        assert!(cookies
+            .iter()
+            .any(|(_, _, domain, _)| domain == "learn.tsinghua.edu.cn"));
+        assert!(cookies
+            .iter()
+            .any(|(_, _, domain, _)| domain == "id.tsinghua.edu.cn"));
     }
 }

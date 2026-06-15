@@ -46,6 +46,7 @@ impl Client {
     pub async fn confirm_session(&self) -> Result<()> {
         let token = self.fetch_csrf().await?;
         self.set_csrf(token).await;
+        self.save_cookies()?;
         Ok(())
     }
 
@@ -108,6 +109,7 @@ impl Client {
             .query(&[("_csrf", csrf.as_str())])
             .send()
             .await?;
+        self.save_cookies()?;
         let text = resp.text().await?;
         serde_json::from_str(&text).with_context(|| {
             format!(
@@ -126,6 +128,7 @@ impl Client {
             .query(&[("_csrf", csrf.as_str())])
             .send()
             .await?;
+        self.save_cookies()?;
         Ok(resp.text().await?)
     }
 
@@ -143,6 +146,7 @@ impl Client {
             .multipart(form)
             .send()
             .await?;
+        self.save_cookies()?;
         let text = resp.text().await?;
         serde_json::from_str(&text).with_context(|| {
             format!(
@@ -162,6 +166,7 @@ impl Client {
             .send()
             .await?
             .error_for_status()?;
+        self.save_cookies()?;
         let bytes = resp.bytes().await?;
         if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent).await.ok();
@@ -180,6 +185,7 @@ impl Client {
             .send()
             .await?
             .error_for_status()?;
+        self.save_cookies()?;
         let cd = resp.headers().get(reqwest::header::CONTENT_DISPOSITION);
         let name = cd.and_then(|v| filename_from_content_disposition(v.as_bytes()));
         let bytes = resp.bytes().await?.to_vec();
